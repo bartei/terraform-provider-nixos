@@ -9,7 +9,28 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -v ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
