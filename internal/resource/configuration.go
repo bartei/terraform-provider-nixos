@@ -3,6 +3,7 @@ package resource
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -168,9 +169,8 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 				Description: "Run nix garbage collection after switching.",
 			},
 			"system_hash": schema.StringAttribute{
-				Computed:      true,
-				Description:   "Nix store hash of the running system after deployment.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Computed:    true,
+				Description: "Nix store hash of the running system after deployment.",
 			},
 		},
 	}
@@ -239,6 +239,13 @@ func (r *ConfigurationResource) Delete(ctx context.Context, _ resource.DeleteReq
 	tflog.Info(ctx, "NixOS configuration removed from Terraform state. The running system is unchanged.")
 }
 
+// progress writes a status line to stderr so it's visible in terraform output
+// without needing TF_LOG, and also logs via tflog for structured logging.
+func progress(ctx context.Context, msg string) {
+	fmt.Fprintf(os.Stderr, "nixos: %s\n", msg)
+	tflog.Info(ctx, msg)
+}
+
 // deploy is the shared logic for Create and Update. It uploads configuration
 // files and keys, builds the NixOS configuration, switches to it, and reads
 // back the system hash.
@@ -250,7 +257,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	configName := plan.ConfigurationName.ValueString()
 
 	// --- Connect to target ---
-	tflog.Info(ctx, "Connecting to target host", map[string]interface{}{"host": host})
+	progress(ctx, fmt.Sprintf("Connecting to %s@%s", user, host))
 	target, err := sshclient.New(host, user, key)
 	if err != nil {
 		diags.AddError("Target SSH Connection Failed",
@@ -266,7 +273,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	if useBuildHost {
 		bh := plan.BuildHost.ValueString()
 		bu := plan.BuildUser.ValueString()
-		tflog.Info(ctx, "Connecting to build host", map[string]interface{}{"host": bh})
+		progress(ctx, fmt.Sprintf("Connecting to build host %s@%s", bu, bh))
 		buildClient, err = sshclient.New(bh, bu, plan.BuildPrivateKey.ValueString())
 		if err != nil {
 			diags.AddError("Build Host SSH Connection Failed",
@@ -284,11 +291,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	}
 
 	// --- Step 1: Upload configuration files ---
-	tflog.Info(ctx, "Uploading NixOS configuration files", map[string]interface{}{
-		"target":     buildClient.Host(),
-		"remote_dir": remoteDir,
-		"files":      len(configFiles),
-	})
+	progress(ctx, fmt.Sprintf("Uploading %d configuration files to %s:%s", len(configFiles), buildClient.Host(), remoteDir))
 	if err := buildClient.WriteFiles(remoteDir, configFiles); err != nil {
 		diags.AddError("Failed to upload configuration files", err.Error())
 		return
@@ -305,10 +308,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 		for name, k := range keys {
 			dest := k.Destination.ValueString()
 			remotePath := fmt.Sprintf("%s/%s", dest, name)
-			tflog.Info(ctx, "Deploying secret key", map[string]interface{}{
-				"name": name,
-				"path": remotePath,
-			})
+			progress(ctx, fmt.Sprintf("Deploying key %s to %s", name, remotePath))
 
 			if _, _, err := target.Run(fmt.Sprintf("mkdir -p %s", dest)); err != nil {
 				diags.AddError(fmt.Sprintf("Failed to create key directory %s", dest), err.Error())
@@ -342,9 +342,9 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	}
 
 	// --- Step 3: Ensure git is available on the build host ---
-	tflog.Info(ctx, "Ensuring git is installed on build host")
+	progress(ctx, "Ensuring git is installed")
 	buildClient.RunStreaming("nix profile install nixpkgs#git", func(line string) {
-		tflog.Debug(ctx, "[git-install] "+line)
+		fmt.Fprintf(os.Stderr, "  %s\n", line)
 	})
 
 	// --- Step 4: Build environment variables ---
@@ -362,9 +362,9 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 
 	// --- Step 5: Build ---
 	buildCmd := fmt.Sprintf("%snixos-rebuild build --flake %s#%s --impure", env, remoteDir, configName)
-	tflog.Info(ctx, "Building NixOS configuration", map[string]interface{}{"command": buildCmd})
+	progress(ctx, fmt.Sprintf("Building NixOS configuration (%s#%s)", remoteDir, configName))
 	if err := buildClient.RunStreaming(buildCmd, func(line string) {
-		tflog.Info(ctx, "[build] "+line)
+		fmt.Fprintf(os.Stderr, "  %s\n", line)
 	}); err != nil {
 		diags.AddError("NixOS build failed", err.Error())
 		return
@@ -375,9 +375,9 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 		r.switchViaBuildHost(ctx, plan, target, buildClient, env, remoteDir, configName, diags)
 	} else {
 		switchCmd := fmt.Sprintf("%snixos-rebuild switch --flake %s#%s --impure", env, remoteDir, configName)
-		tflog.Info(ctx, "Switching NixOS configuration", map[string]interface{}{"command": switchCmd})
+		progress(ctx, "Switching NixOS configuration")
 		if err := target.RunStreaming(switchCmd, func(line string) {
-			tflog.Info(ctx, "[switch] "+line)
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
 		}); err != nil {
 			diags.AddError("NixOS switch failed", err.Error())
 			return
@@ -388,15 +388,15 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	}
 
 	// --- Step 7: Cleanup old generations ---
-	tflog.Info(ctx, "Cleaning up old system generations")
+	progress(ctx, "Cleaning up old system generations")
 	if _, _, err := target.Run("nix-env -p /nix/var/nix/profiles/system --delete-generations +1"); err != nil {
-		tflog.Warn(ctx, "Failed to delete old generations", map[string]interface{}{"error": err.Error()})
+		fmt.Fprintf(os.Stderr, "  warning: failed to delete old generations: %s\n", err)
 	}
 
 	if plan.GarbageCollect.ValueBool() {
-		tflog.Info(ctx, "Running nix garbage collection")
+		progress(ctx, "Running nix garbage collection")
 		target.RunStreaming("nix-store --gc", func(line string) {
-			tflog.Debug(ctx, "[gc] "+line)
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
 		})
 	}
 
@@ -408,10 +408,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	}
 	plan.SystemHash = types.StringValue(strings.TrimSpace(hashOutput))
 
-	tflog.Info(ctx, "Deployment complete", map[string]interface{}{
-		"host":        host,
-		"system_hash": plan.SystemHash.ValueString(),
-	})
+	progress(ctx, fmt.Sprintf("Deployment complete (system_hash: %s)", plan.SystemHash.ValueString()))
 }
 
 // switchViaBuildHost handles the case where the build happened on a separate
@@ -430,7 +427,7 @@ func (r *ConfigurationResource) switchViaBuildHost(
 
 	// Deploy target SSH key to build host temporarily
 	tmpKeyPath := "/tmp/.terraform-nixos-target-key"
-	tflog.Info(ctx, "Deploying temporary SSH key to build host for closure transfer")
+	progress(ctx, "Deploying temporary SSH key to build host for closure transfer")
 	if err := buildClient.WriteFile(tmpKeyPath, []byte(key), 0600); err != nil {
 		diags.AddError("Failed to deploy temporary key to build host", err.Error())
 		return
@@ -446,23 +443,23 @@ func (r *ConfigurationResource) switchViaBuildHost(
 		return
 	}
 	resultPath = strings.TrimSpace(resultPath)
-	tflog.Info(ctx, "Build result", map[string]interface{}{"path": resultPath})
+	progress(ctx, fmt.Sprintf("Build result: %s", resultPath))
 
 	// Copy closure from build host to target
 	copyCmd := fmt.Sprintf(
 		"NIX_SSHOPTS='-i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' nix-copy-closure --to %s@%s %s",
 		tmpKeyPath, user, host, resultPath,
 	)
-	tflog.Info(ctx, "Copying closure from build host to target")
+	progress(ctx, fmt.Sprintf("Copying closure to %s", host))
 	if err := buildClient.RunStreaming(copyCmd, func(line string) {
-		tflog.Info(ctx, "[copy-closure] "+line)
+		fmt.Fprintf(os.Stderr, "  %s\n", line)
 	}); err != nil {
 		diags.AddError("Failed to copy closure to target", err.Error())
 		return
 	}
 
 	// Activate on target
-	tflog.Info(ctx, "Activating configuration on target")
+	progress(ctx, "Activating configuration on target")
 	if _, _, err := target.Run(fmt.Sprintf("nix-env -p /nix/var/nix/profiles/system --set %s", resultPath)); err != nil {
 		diags.AddError("Failed to set system profile", err.Error())
 		return
@@ -470,7 +467,7 @@ func (r *ConfigurationResource) switchViaBuildHost(
 
 	switchCmd := fmt.Sprintf("%s/bin/switch-to-configuration switch", resultPath)
 	if err := target.RunStreaming(switchCmd, func(line string) {
-		tflog.Info(ctx, "[switch] "+line)
+		fmt.Fprintf(os.Stderr, "  %s\n", line)
 	}); err != nil {
 		diags.AddError("Failed to switch configuration on target", err.Error())
 		return
