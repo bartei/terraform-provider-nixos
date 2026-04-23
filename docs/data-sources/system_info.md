@@ -69,7 +69,10 @@ output "deployed_version" {
 
 - `ssh_host` (String) — IP or hostname of the NixOS machine.
 - `ssh_user` (String) — SSH user.
-- `ssh_private_key` (String, Sensitive) — SSH private key for authentication.
+
+### Optional
+- `ssh_use_agent` (Bool) — Use ssh-agent to connect to target.
+- `ssh_private_key` (String, Sensitive) — SSH private key for authentication. (does nothing if `ssh_use_agent` is true)
 
 ## Attribute Reference
 

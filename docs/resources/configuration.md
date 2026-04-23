@@ -138,18 +138,33 @@ resource "nixos_configuration" "this" {
 }
 ```
 
+### Using ssh agent
+
+Deligate authentication to ssh-agent
+
+```
+resource "nixos_configuration" "this" {
+  ssh_host        = "10.0.0.10"
+  ssh_user        = "root"
+  ssh_use_agent   = true
+
+  configuration_files = local.nix_files
+}
+```
+
 ## Argument Reference
 
 ### Required
 
 - `ssh_host` (String) — IP or hostname of the target NixOS machine.
 - `ssh_user` (String) — SSH user for the target machine.
-- `ssh_private_key` (String, Sensitive) — SSH private key for authentication.
 - `configuration_files` (Map of String) — Map of relative file paths to their contents
   for the NixOS flake. Changes to any value trigger a rebuild and switch.
 
 ### Optional
 
+- `ssh_private_key` (String, Sensitive) — SSH private key for authentication. (does nothing if `ssh_use_agent` is true)
+- `ssh_use_agent` (Bool) — Use ssh-agent to connect to target.
 - `configuration_name` (String) — Name of the NixOS configuration output in the flake.
   Default: `"this"`.
 - `remote_directory` (String) — Remote directory where the configuration is uploaded.
@@ -160,7 +175,8 @@ resource "nixos_configuration" "this" {
 - `build_host` (String) — SSH host of a dedicated build machine. When set, the
   NixOS configuration is built here and the closure is copied to the target.
 - `build_user` (String) — SSH user for the build host. Default: `"root"`.
-- `build_private_key` (String, Sensitive) — SSH private key for the build host.
+- `build_private_key` (String, Sensitive) — SSH private key for the build host. (does nothing if `build_use_agent` is true)
+- `build_use_agent` (Bool) — Use ssh-agent to connect to build host.
 - `allow_unfree` (Boolean) — Set `NIXPKGS_ALLOW_UNFREE=1` during build. Default: `true`.
 - `allow_insecure` (Boolean) — Set `NIXPKGS_ALLOW_INSECURE=1` during build. Default: `true`.
 - `garbage_collect` (Boolean) — Run `nix-store --gc` after switching. Default: `true`.
