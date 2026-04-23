@@ -30,6 +30,7 @@ type ConfigurationModel struct {
 	SSHHost            types.String `tfsdk:"ssh_host"`
 	SSHUser            types.String `tfsdk:"ssh_user"`
 	SSHPrivateKey      types.String `tfsdk:"ssh_private_key"`
+	SSHAgent           types.Bool   `tfsdk:"ssh_use_agent"`
 	ConfigurationFiles types.Map    `tfsdk:"configuration_files"`
 	ConfigurationName  types.String `tfsdk:"configuration_name"`
 	RemoteDirectory    types.String `tfsdk:"remote_directory"`
@@ -37,6 +38,7 @@ type ConfigurationModel struct {
 	BuildHost          types.String `tfsdk:"build_host"`
 	BuildUser          types.String `tfsdk:"build_user"`
 	BuildPrivateKey    types.String `tfsdk:"build_private_key"`
+	BuildAgent         types.Bool   `tfsdk:"build_use_agent"`
 	AllowUnfree        types.Bool   `tfsdk:"allow_unfree"`
 	AllowInsecure      types.Bool   `tfsdk:"allow_insecure"`
 	GarbageCollect     types.Bool   `tfsdk:"garbage_collect"`
@@ -79,9 +81,15 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 				Description: "SSH user for the target machine.",
 			},
 			"ssh_private_key": schema.StringAttribute{
-				Required:    true,
+				Optional:    true,
 				Sensitive:   true,
 				Description: "SSH private key for authentication.",
+			},
+			"ssh_use_agent": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "Use ssh agent for connecting to target.",
 			},
 			"configuration_files": schema.MapAttribute{
 				Required:    true,
@@ -150,6 +158,12 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 				Sensitive:   true,
 				Description: "SSH private key for the build host.",
 			},
+			"build_use_agent": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "Use ssh agent for connecting to builder.",
+			},
 			"allow_unfree": schema.BoolAttribute{
 				Optional:    true,
 				Computed:    true,
@@ -199,7 +213,7 @@ func (r *ConfigurationResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	client, err := sshclient.New(state.SSHHost.ValueString(), state.SSHUser.ValueString(), state.SSHPrivateKey.ValueString())
+	client, err := sshclient.New(state.SSHHost.ValueString(), state.SSHUser.ValueString(), state.SSHAgent.ValueBool(), state.SSHPrivateKey.ValueString())
 	if err != nil {
 		// Host unreachable — keep state as-is, don't error on refresh
 		tflog.Warn(ctx, "Cannot connect to host during refresh", map[string]interface{}{
@@ -253,12 +267,13 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	host := plan.SSHHost.ValueString()
 	user := plan.SSHUser.ValueString()
 	key := plan.SSHPrivateKey.ValueString()
+	useAgent := plan.SSHAgent.ValueBool()
 	remoteDir := plan.RemoteDirectory.ValueString()
 	configName := plan.ConfigurationName.ValueString()
 
 	// --- Connect to target ---
 	progress(ctx, fmt.Sprintf("Connecting to %s@%s", user, host))
-	target, err := sshclient.New(host, user, key)
+	target, err := sshclient.New(host, user, useAgent, key)
 	if err != nil {
 		diags.AddError("Target SSH Connection Failed",
 			fmt.Sprintf("Could not connect to %s@%s: %s", user, host, err))
@@ -273,8 +288,9 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	if useBuildHost {
 		bh := plan.BuildHost.ValueString()
 		bu := plan.BuildUser.ValueString()
+		ba := plan.BuildAgent.ValueBool()
 		progress(ctx, fmt.Sprintf("Connecting to build host %s@%s", bu, bh))
-		buildClient, err = sshclient.New(bh, bu, plan.BuildPrivateKey.ValueString())
+		buildClient, err = sshclient.New(bh, bu, ba, plan.BuildPrivateKey.ValueString())
 		if err != nil {
 			diags.AddError("Build Host SSH Connection Failed",
 				fmt.Sprintf("Could not connect to %s@%s: %s", bu, bh, err))

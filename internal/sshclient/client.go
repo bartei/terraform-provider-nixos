@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	gopath "path"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 type Client struct {
@@ -21,16 +23,31 @@ type Client struct {
 	done chan struct{}
 }
 
-func New(host, user, privateKey string) (*Client, error) {
-	signer, err := ssh.ParsePrivateKey([]byte(privateKey))
-	if err != nil {
-		return nil, fmt.Errorf("parsing SSH key: %w", err)
+func New(host, user string, useAgent bool, privateKey string) (*Client, error) {
+	var method ssh.AuthMethod;
+	
+	if !useAgent {
+		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
+		if err != nil {
+			return nil, fmt.Errorf("parsing SSH key: %w", err)
+		}
+
+		method = ssh.PublicKeys(signer)
+	} else {
+		socket := os.Getenv("SSH_AUTH_SOCK")
+		agentConn, err := net.Dial("unix", socket)
+		if err != nil {
+			return nil, fmt.Errorf("open SSH_AUTH_SOCK: %v", err)
+		}
+
+		agentClient := agent.NewClient(agentConn)
+		method = ssh.PublicKeysCallback(agentClient.Signers)
 	}
 
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
+			method,
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
