@@ -29,10 +29,15 @@ jobs:
           terraform_wrapper: false
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        # Pinned to a release tag instead of @main to avoid drifting onto a
+        # build of the action that requires Node runtimes GitHub has marked
+        # deprecated.
+        uses: DeterminateSystems/nix-installer-action@v22
 
-      - name: Cache /nix/store
-        uses: DeterminateSystems/magic-nix-cache-action@main
+      # Note: DeterminateSystems/magic-nix-cache-action now requires FlakeHub
+      # registration. We rely on Nix's own substituter (cache.nixos.org) for
+      # binary cache hits — first run rebuilds the qcow2 image (~3-4 min on
+      # a cold runner), subsequent jobs only build the test toplevel diff.
 
       - name: Install QEMU
         run: |

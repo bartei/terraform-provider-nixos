@@ -1,5 +1,8 @@
 # terraform-provider-nixos
 
+[![Test](https://github.com/bartei/terraform-provider-nixos/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bartei/terraform-provider-nixos/actions/workflows/test.yml)
+[![Acceptance](https://github.com/bartei/terraform-provider-nixos/actions/workflows/acceptance.yml/badge.svg?branch=main)](https://github.com/bartei/terraform-provider-nixos/actions/workflows/acceptance.yml)
+
 A Terraform provider for managing [NixOS](https://nixos.org/) configurations on remote hosts via SSH.
 
 ## Features
