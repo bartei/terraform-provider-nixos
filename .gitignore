@@ -1,1 +1,13 @@
 terraform-provider-nixos
+
+# IDE & local-only files
+.idea/
+TODO.md
+
+# Acceptance test artefacts
+/test/qemu/.keys/
+/test/qemu/result-image
+/test/qemu/overlay.qcow2
+/test/qemu/qemu.pid
+/test/qemu/serial.log
+/test/qemu/.vm-host

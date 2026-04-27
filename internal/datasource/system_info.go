@@ -20,6 +20,7 @@ type SystemInfoDataSource struct{}
 type SystemInfoModel struct {
 	ID                types.String `tfsdk:"id"`
 	SSHHost           types.String `tfsdk:"ssh_host"`
+	SSHPort           types.Int64  `tfsdk:"ssh_port"`
 	SSHUser           types.String `tfsdk:"ssh_user"`
 	SSHPrivateKey     types.String `tfsdk:"ssh_private_key"`
 	SSHAgent          types.Bool   `tfsdk:"ssh_use_agent"`
@@ -50,6 +51,10 @@ func (d *SystemInfoDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 			"ssh_host": schema.StringAttribute{
 				Required:    true,
 				Description: "IP or hostname of the NixOS machine.",
+			},
+			"ssh_port": schema.Int64Attribute{
+				Optional:    true,
+				Description: "SSH port (default 22).",
 			},
 			"ssh_user": schema.StringAttribute{
 				Required:    true,
@@ -106,7 +111,7 @@ func (d *SystemInfoDataSource) Read(ctx context.Context, req datasource.ReadRequ
 	host := config.SSHHost.ValueString()
 	tflog.Info(ctx, "Reading NixOS system info", map[string]interface{}{"host": host})
 
-	client, err := sshclient.New(host, config.SSHUser.ValueString(), config.SSHAgent.ValueBool(), config.SSHPrivateKey.ValueString())
+	client, err := sshclient.New(host, int(config.SSHPort.ValueInt64()), config.SSHUser.ValueString(), config.SSHAgent.ValueBool(), config.SSHPrivateKey.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("SSH Connection Failed",
 			fmt.Sprintf("Could not connect to %s: %s", host, err))

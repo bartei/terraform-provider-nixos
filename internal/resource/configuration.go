@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -28,6 +29,7 @@ type ConfigurationResource struct{}
 type ConfigurationModel struct {
 	ID                 types.String `tfsdk:"id"`
 	SSHHost            types.String `tfsdk:"ssh_host"`
+	SSHPort            types.Int64  `tfsdk:"ssh_port"`
 	SSHUser            types.String `tfsdk:"ssh_user"`
 	SSHPrivateKey      types.String `tfsdk:"ssh_private_key"`
 	SSHAgent           types.Bool   `tfsdk:"ssh_use_agent"`
@@ -36,6 +38,7 @@ type ConfigurationModel struct {
 	RemoteDirectory    types.String `tfsdk:"remote_directory"`
 	Keys               types.Map    `tfsdk:"keys"`
 	BuildHost          types.String `tfsdk:"build_host"`
+	BuildPort          types.Int64  `tfsdk:"build_port"`
 	BuildUser          types.String `tfsdk:"build_user"`
 	BuildPrivateKey    types.String `tfsdk:"build_private_key"`
 	BuildAgent         types.Bool   `tfsdk:"build_use_agent"`
@@ -75,6 +78,12 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 			"ssh_host": schema.StringAttribute{
 				Required:    true,
 				Description: "IP or hostname of the target NixOS machine.",
+			},
+			"ssh_port": schema.Int64Attribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(22),
+				Description: "SSH port for the target machine.",
 			},
 			"ssh_user": schema.StringAttribute{
 				Required:    true,
@@ -147,6 +156,12 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 					"configuration is built here and the closure is copied to the target. " +
 					"The build host must be able to reach the target via SSH.",
 			},
+			"build_port": schema.Int64Attribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(22),
+				Description: "SSH port for the build host.",
+			},
 			"build_user": schema.StringAttribute{
 				Optional:    true,
 				Computed:    true,
@@ -213,7 +228,7 @@ func (r *ConfigurationResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	client, err := sshclient.New(state.SSHHost.ValueString(), state.SSHUser.ValueString(), state.SSHAgent.ValueBool(), state.SSHPrivateKey.ValueString())
+	client, err := sshclient.New(state.SSHHost.ValueString(), int(state.SSHPort.ValueInt64()), state.SSHUser.ValueString(), state.SSHAgent.ValueBool(), state.SSHPrivateKey.ValueString())
 	if err != nil {
 		// Host unreachable — keep state as-is, don't error on refresh
 		tflog.Warn(ctx, "Cannot connect to host during refresh", map[string]interface{}{
@@ -265,6 +280,7 @@ func progress(ctx context.Context, msg string) {
 // back the system hash.
 func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationModel, diags *diag.Diagnostics) {
 	host := plan.SSHHost.ValueString()
+	port := int(plan.SSHPort.ValueInt64())
 	user := plan.SSHUser.ValueString()
 	key := plan.SSHPrivateKey.ValueString()
 	useAgent := plan.SSHAgent.ValueBool()
@@ -272,11 +288,11 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	configName := plan.ConfigurationName.ValueString()
 
 	// --- Connect to target ---
-	progress(ctx, fmt.Sprintf("Connecting to %s@%s", user, host))
-	target, err := sshclient.New(host, user, useAgent, key)
+	progress(ctx, fmt.Sprintf("Connecting to %s@%s:%d", user, host, port))
+	target, err := sshclient.New(host, port, user, useAgent, key)
 	if err != nil {
 		diags.AddError("Target SSH Connection Failed",
-			fmt.Sprintf("Could not connect to %s@%s: %s", user, host, err))
+			fmt.Sprintf("Could not connect to %s@%s:%d: %s", user, host, port, err))
 		return
 	}
 	defer target.Close()
@@ -287,13 +303,14 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 
 	if useBuildHost {
 		bh := plan.BuildHost.ValueString()
+		bp := int(plan.BuildPort.ValueInt64())
 		bu := plan.BuildUser.ValueString()
 		ba := plan.BuildAgent.ValueBool()
-		progress(ctx, fmt.Sprintf("Connecting to build host %s@%s", bu, bh))
-		buildClient, err = sshclient.New(bh, bu, ba, plan.BuildPrivateKey.ValueString())
+		progress(ctx, fmt.Sprintf("Connecting to build host %s@%s:%d", bu, bh, bp))
+		buildClient, err = sshclient.New(bh, bp, bu, ba, plan.BuildPrivateKey.ValueString())
 		if err != nil {
 			diags.AddError("Build Host SSH Connection Failed",
-				fmt.Sprintf("Could not connect to %s@%s: %s", bu, bh, err))
+				fmt.Sprintf("Could not connect to %s@%s:%d: %s", bu, bh, bp, err))
 			return
 		}
 		defer buildClient.Close()
@@ -377,7 +394,9 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	}
 
 	// --- Step 5: Build ---
-	buildCmd := fmt.Sprintf("%snixos-rebuild build --flake %s#%s --impure", env, remoteDir, configName)
+	// `cd` into remoteDir so the `result` symlink lands there (not in
+	// $HOME). switchViaBuildHost reads remoteDir/result later.
+	buildCmd := fmt.Sprintf("cd %s && %snixos-rebuild build --flake .#%s --impure", remoteDir, env, configName)
 	progress(ctx, fmt.Sprintf("Building NixOS configuration (%s#%s)", remoteDir, configName))
 	if err := buildClient.RunStreaming(buildCmd, func(line string) {
 		fmt.Fprintf(os.Stderr, "  %s\n", line)
@@ -438,19 +457,41 @@ func (r *ConfigurationResource) switchViaBuildHost(
 	diags *diag.Diagnostics,
 ) {
 	host := plan.SSHHost.ValueString()
+	port := int(plan.SSHPort.ValueInt64())
 	user := plan.SSHUser.ValueString()
+	useAgent := plan.SSHAgent.ValueBool()
 	key := plan.SSHPrivateKey.ValueString()
 
-	// Deploy target SSH key to build host temporarily
-	tmpKeyPath := "/tmp/.terraform-nixos-target-key"
-	progress(ctx, "Deploying temporary SSH key to build host for closure transfer")
-	if err := buildClient.WriteFile(tmpKeyPath, []byte(key), 0600); err != nil {
-		diags.AddError("Failed to deploy temporary key to build host", err.Error())
-		return
+	// nix-copy-closure on the build host needs to authenticate to the target.
+	// In agent mode we don't have a key file to copy — forward our local
+	// agent so the build host's ssh client can use it. In key mode we
+	// materialize the target's key on the build host (the original behavior).
+	var sshOpts string
+	if useAgent {
+		progress(ctx, "Enabling SSH agent forwarding on build host for closure transfer")
+		if err := buildClient.EnableAgentForwarding(); err != nil {
+			diags.AddError("Failed to enable agent forwarding to build host", err.Error())
+			return
+		}
+		sshOpts = fmt.Sprintf(
+			"-p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+			port,
+		)
+	} else {
+		tmpKeyPath := "/tmp/.terraform-nixos-target-key"
+		progress(ctx, "Deploying temporary SSH key to build host for closure transfer")
+		if err := buildClient.WriteFile(tmpKeyPath, []byte(key), 0600); err != nil {
+			diags.AddError("Failed to deploy temporary key to build host", err.Error())
+			return
+		}
+		defer func() {
+			buildClient.Run(fmt.Sprintf("rm -f %s", tmpKeyPath))
+		}()
+		sshOpts = fmt.Sprintf(
+			"-i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+			tmpKeyPath, port,
+		)
 	}
-	defer func() {
-		buildClient.Run(fmt.Sprintf("rm -f %s", tmpKeyPath))
-	}()
 
 	// Get the build result path
 	resultPath, _, err := buildClient.Run(fmt.Sprintf("readlink -f %s/result", remoteDir))
@@ -461,10 +502,9 @@ func (r *ConfigurationResource) switchViaBuildHost(
 	resultPath = strings.TrimSpace(resultPath)
 	progress(ctx, fmt.Sprintf("Build result: %s", resultPath))
 
-	// Copy closure from build host to target
 	copyCmd := fmt.Sprintf(
-		"NIX_SSHOPTS='-i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' nix-copy-closure --to %s@%s %s",
-		tmpKeyPath, user, host, resultPath,
+		"NIX_SSHOPTS='%s' nix-copy-closure --to %s@%s %s",
+		sshOpts, user, host, resultPath,
 	)
 	progress(ctx, fmt.Sprintf("Copying closure to %s", host))
 	if err := buildClient.RunStreaming(copyCmd, func(line string) {

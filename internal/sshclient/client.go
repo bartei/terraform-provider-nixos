@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	gopath "path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,14 +19,20 @@ import (
 )
 
 type Client struct {
-	conn *ssh.Client
-	host string
-	done chan struct{}
+	conn             *ssh.Client
+	host             string
+	done             chan struct{}
+	forwardAgent     bool
+	forwardRequested bool
 }
 
-func New(host, user string, useAgent bool, privateKey string) (*Client, error) {
-	var method ssh.AuthMethod;
-	
+func New(host string, port int, user string, useAgent bool, privateKey string) (*Client, error) {
+	if port == 0 {
+		port = 22
+	}
+
+	var method ssh.AuthMethod
+
 	if !useAgent {
 		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
 		if err != nil {
@@ -53,9 +60,10 @@ func New(host, user string, useAgent bool, privateKey string) (*Client, error) {
 		Timeout:         30 * time.Second,
 	}
 
-	conn, err := ssh.Dial("tcp", host+":22", config)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	conn, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %s: %w", host, err)
+		return nil, fmt.Errorf("connecting to %s: %w", addr, err)
 	}
 
 	c := &Client{conn: conn, host: host, done: make(chan struct{})}
@@ -86,6 +94,46 @@ func (c *Client) Close() error {
 	return c.conn.Close()
 }
 
+// maybeRequestAgent issues the `auth-agent-req@openssh.com` channel request
+// on the first session after EnableAgentForwarding was called. OpenSSH's sshd
+// uses a per-connection `static int called = 0` guard in
+// `session_auth_agent_req`, so only the first request per connection
+// succeeds; all subsequent ones return failure. We only need the first
+// success — once sshd has set up the forwarding socket, every later command
+// exec'd on this connection inherits SSH_AUTH_SOCK.
+func (c *Client) maybeRequestAgent(session *ssh.Session) error {
+	if !c.forwardAgent || c.forwardRequested {
+		return nil
+	}
+	if err := agent.RequestAgentForwarding(session); err != nil {
+		return fmt.Errorf("requesting agent forwarding: %w", err)
+	}
+	c.forwardRequested = true
+	return nil
+}
+
+// EnableAgentForwarding wires the local SSH agent (via SSH_AUTH_SOCK) into
+// this connection so commands run on this client can authenticate to other
+// hosts using the same identities. This is what `ssh -A` does. After calling
+// this, subsequent Run/RunStreaming sessions will request agent forwarding.
+//
+// Returns an error if SSH_AUTH_SOCK is unset or the agent isn't reachable.
+func (c *Client) EnableAgentForwarding() error {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return fmt.Errorf("SSH_AUTH_SOCK is not set")
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return fmt.Errorf("dialing agent: %w", err)
+	}
+	if err := agent.ForwardToAgent(c.conn, agent.NewClient(conn)); err != nil {
+		return fmt.Errorf("registering agent forward: %w", err)
+	}
+	c.forwardAgent = true
+	return nil
+}
+
 // Run executes a command and returns stdout, stderr, and any error.
 func (c *Client) Run(cmd string) (string, string, error) {
 	session, err := c.conn.NewSession()
@@ -93,6 +141,10 @@ func (c *Client) Run(cmd string) (string, string, error) {
 		return "", "", fmt.Errorf("creating session: %w", err)
 	}
 	defer session.Close()
+
+	if err := c.maybeRequestAgent(session); err != nil {
+		return "", "", err
+	}
 
 	var stdout, stderr bytes.Buffer
 	session.Stdout = &stdout
@@ -110,6 +162,10 @@ func (c *Client) RunStreaming(cmd string, onOutput func(string)) error {
 		return fmt.Errorf("creating session: %w", err)
 	}
 	defer session.Close()
+
+	if err := c.maybeRequestAgent(session); err != nil {
+		return err
+	}
 
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {

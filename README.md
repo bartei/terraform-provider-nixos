@@ -87,6 +87,44 @@ make install
 make dev
 ```
 
+### Acceptance tests
+
+End-to-end tests that run a real `terraform apply` against a NixOS VM.
+
+**Prerequisites (local):**
+
+- [Nix](https://nixos.org/download.html) (for building the test VM image)
+- [QEMU](https://www.qemu.org/) — `qemu-system-x86_64` and `qemu-img`
+- KVM access (`/dev/kvm` readable by your user) recommended; tests fall back
+  to TCG emulation otherwise but it's much slower
+- `terraform` on `$PATH` (the test framework downloads it if missing)
+
+**Running locally:**
+
+```bash
+# Build the VM image and boot it (one-time per session):
+make testacc-vm-up
+
+# Run the suite (set TF_ACC=1; reads the VM host:port from test/qemu/.vm-host):
+make testacc
+
+# Tear down:
+make testacc-vm-down
+```
+
+**Environment variables consumed by the suite:**
+
+| Var | Default | Notes |
+|---|---|---|
+| `TF_ACC` | _(required)_ | Must be `1` or the suite skips. |
+| `NIXOS_TEST_HOST` | _(required)_ | `host:port` of the test target. |
+| `NIXOS_TEST_KEY_PATH` | _(required)_ | Path to the SSH private key. |
+| `NIXOS_TEST_USER` | `root` | SSH user. |
+
+**CI:** the same suite runs on every push and pull request via
+`.github/workflows/acceptance.yml`, with the QEMU VM brought up inside the
+runner.
+
 ### Releasing
 
 Push a version tag to trigger the GitHub Actions release workflow:
