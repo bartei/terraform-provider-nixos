@@ -140,7 +140,9 @@ resource "nixos_configuration" "this" {
 
 ### Using ssh agent
 
-Deligate authentication to ssh-agent
+Delegate authentication to ssh-agent. The terraform process must have
+`SSH_AUTH_SOCK` set and the agent must hold a key authorized on the target
+host.
 
 ```
 resource "nixos_configuration" "this" {
@@ -151,6 +153,13 @@ resource "nixos_configuration" "this" {
   configuration_files = local.nix_files
 }
 ```
+
+When `ssh_use_agent = true` is combined with `build_host`, the provider
+forwards the local agent over the SSH connection to the build host so
+`nix-copy-closure` can authenticate to the target without a key file ever
+touching disk on the builder. The agent must therefore hold keys
+authorized on **both** hops. Agent forwarding requires `AllowAgentForwarding
+yes` in the build host's `sshd_config` (the OpenSSH default).
 
 ## Argument Reference
 
@@ -163,8 +172,12 @@ resource "nixos_configuration" "this" {
 
 ### Optional
 
+- `ssh_port` (Number) — SSH port for the target machine. Default: `22`.
 - `ssh_private_key` (String, Sensitive) — SSH private key for authentication. (does nothing if `ssh_use_agent` is true)
-- `ssh_use_agent` (Bool) — Use ssh-agent to connect to target.
+- `ssh_use_agent` (Bool) — Use ssh-agent to connect to target. Reads
+  `SSH_AUTH_SOCK` from the terraform process's environment. When combined
+  with `build_host`, the agent is forwarded to the build host for the
+  closure-copy step.
 - `configuration_name` (String) — Name of the NixOS configuration output in the flake.
   Default: `"this"`.
 - `remote_directory` (String) — Remote directory where the configuration is uploaded.
@@ -174,6 +187,7 @@ resource "nixos_configuration" "this" {
   Each key in the map becomes the filename. See [Nested Schema for `keys`](#nested-schema-for-keys).
 - `build_host` (String) — SSH host of a dedicated build machine. When set, the
   NixOS configuration is built here and the closure is copied to the target.
+- `build_port` (Number) — SSH port for the build host. Default: `22`.
 - `build_user` (String) — SSH user for the build host. Default: `"root"`.
 - `build_private_key` (String, Sensitive) — SSH private key for the build host. (does nothing if `build_use_agent` is true)
 - `build_use_agent` (Bool) — Use ssh-agent to connect to build host.

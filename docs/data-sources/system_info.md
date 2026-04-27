@@ -71,6 +71,7 @@ output "deployed_version" {
 - `ssh_user` (String) — SSH user.
 
 ### Optional
+- `ssh_port` (Number) — SSH port. Default: `22`.
 - `ssh_use_agent` (Bool) — Use ssh-agent to connect to target.
 - `ssh_private_key` (String, Sensitive) — SSH private key for authentication. (does nothing if `ssh_use_agent` is true)
 
