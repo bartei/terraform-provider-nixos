@@ -376,7 +376,10 @@ func (r *SystemManagerResource) deploy(ctx context.Context, plan *SystemManagerM
 	// `switch` = nix build → register profile → activate (units + /etc).
 	// The CLI itself is fetched from system_manager_flake so it can be pinned
 	// to the same release branch as the flake's system-manager input.
-	switchCmd := fmt.Sprintf("%snix run %q -- switch --flake %q",
+	// pure-eval=false is the nix.conf equivalent of --impure (NIX_CONFIG cannot
+	// override it): it lets the flake builtins.readFile the deployed /var/keys,
+	// like nixos_configuration's unconditional --impure.
+	switchCmd := fmt.Sprintf("%snix run %q -- switch --flake %q --nix-option pure-eval false",
 		nixEnv(plan), plan.SystemManagerFlake.ValueString(), fmt.Sprintf("%s#%s", remoteDir, configName))
 	progress(ctx, fmt.Sprintf("Switching system-manager configuration (%s#%s)", remoteDir, configName))
 	if err := target.RunStreaming(switchCmd, streamer(ctx, "switch")); err != nil {

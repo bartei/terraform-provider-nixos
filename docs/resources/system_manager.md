@@ -21,8 +21,10 @@ On each apply the provider:
    is true, runs the official multi-user installer (`--daemon --yes`)
 2. Uploads the flake files to `remote_directory`
 3. Deploys secret key files with the requested ownership and permissions
-4. Runs `nix run <system_manager_flake> -- switch --flake <remote_directory>#<configuration_name>`
-   (build → register profile → activate units and /etc files)
+4. Runs `nix run <system_manager_flake> -- switch --flake <remote_directory>#<configuration_name> --nix-option pure-eval false`
+   (build → register profile → activate units and /etc files). Evaluation is
+   impure, as with `nixos_configuration`, so the flake can `builtins.readFile`
+   the deployed `keys` (e.g. `/var/keys/node_ip`)
 5. Deletes generations of the system-manager profile older than the previous one
    (current and previous are kept) and runs `nix-store --gc` (unless
    `garbage_collect = false`)
