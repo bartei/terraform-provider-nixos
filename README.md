@@ -10,7 +10,8 @@ A Terraform provider for managing [NixOS](https://nixos.org/) configurations on 
 - **Plan-time diffs** — Nix files are passed as a Terraform map, so `terraform plan` shows exactly which lines changed.
 - **Secret key deployment** — Upload secret files with precise ownership and permissions before building.
 - **Dedicated build hosts** — Offload builds to a powerful machine and transfer the closure to the target via `nix-copy-closure`.
-- **Streaming output** — Build and switch output streams in real time through Terraform's logging.
+- **Streaming output** — Build and switch output streams in real time through Terraform's logging (visible with `TF_LOG=INFO`).
+- **Rollback-friendly** — Old system generations are kept (5 by default, configurable) so a bad deploy can be reverted from the bootloader.
 - **SSH keepalive** — Long-running builds won't drop due to idle connections.
 
 ## Quick Start
@@ -31,7 +32,7 @@ locals {
   nix_files = {
     for f in fileset("${path.module}/nix", "**") :
     f => file("${path.module}/nix/${f}")
-    if !startswith(f, ".") && !contains(f, "/.")
+    if !startswith(f, ".") && !strcontains(f, "/.")
   }
 }
 
@@ -70,6 +71,7 @@ my-server/
 | Resource | Description |
 |---|---|
 | [nixos_configuration](docs/resources/configuration.md) | Manages a NixOS configuration on a remote host |
+| [nixos_system_manager](docs/resources/system_manager.md) | Manages a numtide/system-manager profile on a non-NixOS Linux host (Debian, Ubuntu) |
 
 ## Data Sources
 
@@ -105,14 +107,19 @@ End-to-end tests that run a real `terraform apply` against a NixOS VM.
 **Running locally:**
 
 ```bash
-# Build the VM image and boot it (one-time per session):
+# Build the NixOS VM image and boot it (one-time per session):
 make testacc-vm-up
 
-# Run the suite (set TF_ACC=1; reads the VM host:port from test/qemu/.vm-host):
+# Optional: boot a stock Debian VM for the nixos_system_manager tests
+# (needs genisoimage from cdrkit; the tests skip without it):
+make testacc-debian-vm-up
+
+# Run the suite (set TF_ACC=1; reads the VM host:port files under test/):
 make testacc
 
 # Tear down:
 make testacc-vm-down
+make testacc-debian-vm-down
 ```
 
 **Environment variables consumed by the suite:**
@@ -120,7 +127,8 @@ make testacc-vm-down
 | Var | Default | Notes |
 |---|---|---|
 | `TF_ACC` | _(required)_ | Must be `1` or the suite skips. |
-| `NIXOS_TEST_HOST` | _(required)_ | `host:port` of the test target. |
+| `NIXOS_TEST_HOST` | _(required)_ | `host:port` of the NixOS test target. |
+| `SYSMGR_TEST_HOST` | _(optional)_ | `host:port` of the Debian target; `nixos_system_manager` tests skip when empty. |
 | `NIXOS_TEST_KEY_PATH` | _(required)_ | Path to the SSH private key. |
 | `NIXOS_TEST_USER` | `root` | SSH user. |
 

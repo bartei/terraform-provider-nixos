@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -88,6 +89,12 @@ func readPubKey(t *testing.T, target acctest.Target) string {
 //   - withBuildHost=true: also sets build_host/build_port/build_user, plus
 //     either build_private_key or build_use_agent depending on useAgent.
 func configHCL(t acctest.Target, flake string, useAgent, withBuildHost bool) string {
+	return configHCLExtra(t, flake, useAgent, withBuildHost, "")
+}
+
+// configHCLExtra is configHCL with additional raw attribute lines (`extra`)
+// injected into the resource block.
+func configHCLExtra(t acctest.Target, flake string, useAgent, withBuildHost bool, extra string) string {
 	var auth string
 	if useAgent {
 		auth = "ssh_use_agent = true"
@@ -122,20 +129,49 @@ resource "nixos_configuration" "this" {
   ssh_user = %q
   %s
 %s
+  %s
   configuration_files = {
     "flake.nix" = <<-EOT
     %s
     EOT
   }
 }
-`, t.Host, t.Port, t.User, auth, build, indented)
+`, t.Host, t.Port, t.User, auth, build, extra, indented)
+}
+
+// systemGenerations returns the number of generations in the target's system
+// profile.
+func systemGenerations(t *testing.T, target acctest.Target) int {
+	t.Helper()
+	cli := acctest.SSHClient(t, target)
+	out := strings.TrimSpace(acctest.RunRemote(t, cli,
+		"nix-env -p /nix/var/nix/profiles/system --list-generations | wc -l"))
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		t.Fatalf("parsing generation count %q: %v", out, err)
+	}
+	return n
+}
+
+// checkGenerations returns a TestCheckFunc asserting on the generation count.
+func checkGenerations(t *testing.T, target acctest.Target, ok func(int) bool, want string) resource.TestCheckFunc {
+	return func(_ *tftest.State) error {
+		n := systemGenerations(t, target)
+		if !ok(n) {
+			return fmt.Errorf("system profile has %d generations, want %s", n, want)
+		}
+		return nil
+	}
 }
 
 // systemHashRegex matches the format the provider stores: "sha256:<base32>".
 const systemHashRegex = `^sha256:[a-z0-9]+$`
 
 // TestAcc_Configuration_PrivateKey_Lifecycle covers the default auth path:
-// apply → update → destroy with a literal SSH private key.
+// apply → update → destroy with a literal SSH private key. It also verifies
+// generation pruning: the default keeps previous generations (so rollback is
+// possible), keep_generations = 1 prunes down to the current one, and
+// keep_generations = 0 disables pruning entirely.
 func TestAcc_Configuration_PrivateKey_Lifecycle(t *testing.T) {
 	target, err := acctest.TargetFromEnv()
 	if err != nil {
@@ -167,6 +203,21 @@ func TestAcc_Configuration_PrivateKey_Lifecycle(t *testing.T) {
 							"nixos_configuration.this", plancheck.ResourceActionUpdate),
 					},
 				},
+				// Two applies in this test with the default keep_generations
+				// must leave at least two generations (v1 is still bootable).
+				Check: checkGenerations(t, target, func(n int) bool { return n >= 2 }, ">= 2"),
+			},
+			{
+				Config: configHCLExtra(target, minimalNixOSFlake(pub, "v2"), false, false,
+					"keep_generations = 1"),
+				Check: checkGenerations(t, target, func(n int) bool { return n == 1 }, "== 1"),
+			},
+			{
+				Config: configHCLExtra(target, minimalNixOSFlake(pub, "v3"), false, false,
+					"keep_generations = 0"),
+				// Previous step left exactly 1; this deploy adds one and must
+				// not prune.
+				Check: checkGenerations(t, target, func(n int) bool { return n == 2 }, "== 2"),
 			},
 		},
 	})
@@ -261,7 +312,8 @@ func TestAcc_Configuration_Keys(t *testing.T) {
 
 // TestAcc_Configuration_BuildHost_PrivateKey exercises switchViaBuildHost
 // with the same VM as both target and build host, authenticated by literal
-// private keys on both ends.
+// private keys on both ends. It also verifies that the temporary target key
+// materialized on the build host (a unique mktemp file) is removed afterwards.
 func TestAcc_Configuration_BuildHost_PrivateKey(t *testing.T) {
 	target, err := acctest.TargetFromEnv()
 	if err != nil {
@@ -281,6 +333,15 @@ func TestAcc_Configuration_BuildHost_PrivateKey(t *testing.T) {
 						tfjsonpath.New("system_hash"),
 						knownvalue.StringRegexp(mustCompile(t, systemHashRegex)),
 					),
+				},
+				Check: func(_ *tftest.State) error {
+					cli := acctest.SSHClient(t, target)
+					out := strings.TrimSpace(acctest.RunRemote(t, cli,
+						"ls -1 /tmp/.terraform-nixos-key.* /tmp/.terraform-nixos-target-key 2>/dev/null | wc -l"))
+					if out != "0" {
+						return fmt.Errorf("expected no leftover temporary key files on build host, found %s", out)
+					}
+					return nil
 				},
 			},
 		},

@@ -21,8 +21,11 @@ diffing and streaming build output.
 - **Dedicated build hosts**: Offload `nixos-rebuild` to a powerful build machine and
   transfer the closure to the target, keeping production systems under low load and
   leveraging shared Nix caches.
+- **Non-NixOS hosts**: The `nixos_system_manager` resource applies a
+  [system-manager](https://github.com/numtide/system-manager) flake to Debian or Ubuntu
+  machines, installing Nix first if needed.
 - **Streaming output**: Build and switch output is streamed through Terraform's logging
-  so you see progress in real time.
+  so you can follow progress in real time (run with `TF_LOG=INFO` to see it).
 - **SSH keepalive**: Long-running builds (10+ minutes) won't drop due to idle timeouts.
 
 ## Example Usage
@@ -42,7 +45,7 @@ locals {
   nix_files = {
     for f in fileset("${path.module}/nix", "**") :
     f => file("${path.module}/nix/${f}")
-    if !startswith(f, ".") && !contains(f, "/.")
+    if !startswith(f, ".") && !strcontains(f, "/.")
   }
 }
 

@@ -41,6 +41,7 @@ func (p *NixOSProvider) Configure(_ context.Context, _ provider.ConfigureRequest
 func (p *NixOSProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		nixosrs.NewConfigurationResource,
+		nixosrs.NewSystemManagerResource,
 	}
 }
 

@@ -11,3 +11,10 @@ TODO.md
 /test/qemu/qemu.pid
 /test/qemu/serial.log
 /test/qemu/.vm-host
+/test/debian/base.qcow2
+/test/debian/base.qcow2.part
+/test/debian/overlay.qcow2
+/test/debian/seed.iso
+/test/debian/qemu.pid
+/test/debian/serial.log
+/test/debian/.vm-host

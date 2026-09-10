@@ -21,6 +21,13 @@ jobs:
         with:
           go-version-file: "go.mod"
 
+      # Schema-validation unit tests drive a real `terraform` binary through
+      # terraform-plugin-testing (no remote host involved).
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
       - name: Build
         run: go build -v ./...
 

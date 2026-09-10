@@ -42,7 +42,7 @@ jobs:
       - name: Install QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
 
       - name: Probe KVM
         run: |
@@ -63,22 +63,35 @@ jobs:
         env:
           NIXOS_TEST_BOOT_TIMEOUT: "300"
 
+      # Second VM: stock Debian cloud image, the non-NixOS target for the
+      # nixos_system_manager tests (Nix gets installed by the provider).
+      - name: Boot Debian VM
+        run: ./run.sh > .vm-host
+        working-directory: test/debian
+        env:
+          DEBIAN_TEST_BOOT_TIMEOUT: "300"
+
       - name: Run acceptance tests
         run: |
           export TF_ACC=1
           export NIXOS_TEST_HOST=$(cat test/qemu/.vm-host)
+          export SYSMGR_TEST_HOST=$(cat test/debian/.vm-host)
           export NIXOS_TEST_KEY_PATH=$PWD/test/qemu/.keys/id_ed25519
           export NIXOS_TEST_USER=root
-          go test -v -count=1 -timeout 30m ./internal/resource/...
+          go test -v -count=1 -timeout 30m ./internal/resource/... ./internal/sshclient/...
 
-      - name: Dump VM serial log on failure
+      - name: Dump VM serial logs on failure
         if: failure()
         run: |
-          echo "::group::VM serial log"
+          echo "::group::NixOS VM serial log"
           tail -200 test/qemu/serial.log || true
           echo "::endgroup::"
+          echo "::group::Debian VM serial log"
+          tail -200 test/debian/serial.log || true
+          echo "::endgroup::"
 
-      - name: Stop VM
+      - name: Stop VMs
         if: always()
-        run: ./stop.sh
-        working-directory: test/qemu
+        run: |
+          (cd test/qemu && ./stop.sh)
+          (cd test/debian && ./stop.sh)

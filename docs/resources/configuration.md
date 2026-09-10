@@ -15,7 +15,9 @@ Manages a NixOS configuration on a remote host via SSH. On each apply the provid
 2. Deploys secret key files with specified ownership and permissions
 3. Runs `nixos-rebuild build` to compile the new system derivation
 4. Runs `nixos-rebuild switch` to activate it
-5. Cleans up old generations and optionally garbage-collects the Nix store
+5. Prunes old system generations (keeping the most recent `keep_generations`,
+   default 5, so you can still roll back from the bootloader) and optionally
+   garbage-collects the Nix store
 
 Because `configuration_files` is a regular Terraform map attribute, `terraform plan`
 shows a line-by-line diff of every changed Nix file before you apply.
@@ -32,7 +34,7 @@ locals {
   nix_files = {
     for f in fileset("${path.module}/nix", "**") :
     f => file("${path.module}/nix/${f}")
-    if !startswith(f, ".") && !contains(f, "/.")
+    if !startswith(f, ".") && !strcontains(f, "/.")
   }
 }
 
@@ -101,9 +103,15 @@ When `build_host` is set, the provider:
 1. Uploads configuration files to the **build host**
 2. Deploys secret keys to the **target**
 3. Runs `nixos-rebuild build` on the **build host**
-4. Temporarily deploys the target SSH key to the build host
+4. Temporarily deploys the target SSH key to a unique `mktemp` file on the
+   build host (removed once the copy finishes)
 5. Runs `nix-copy-closure` from the build host to the target
 6. Activates the new configuration on the target via `switch-to-configuration switch`
+
+When several `nixos_configuration` resources share one build host, give each
+its own `remote_directory`. Terraform applies resources concurrently, and the
+directory is wiped and re-uploaded on every deploy, so two resources using the
+same path on the same builder would overwrite each other mid-build.
 
 ### Inline Configuration Files
 
@@ -181,8 +189,12 @@ yes` in the build host's `sshd_config` (the OpenSSH default).
 - `configuration_name` (String) — Name of the NixOS configuration output in the flake.
   Default: `"this"`.
 - `remote_directory` (String) — Remote directory where the configuration is uploaded.
-  This directory is **cleaned before each upload** to ensure a consistent state.
-  Default: `"/root/nix"`.
+  This directory is **deleted and recreated before each upload** to ensure a
+  consistent state, so the value is validated at plan time: it must be a clean
+  absolute path with at least two components (`/root/nix` is fine, `/root` or
+  `/` are rejected), contain only letters, digits, `.`, `_`, `-` and `/`, and
+  not be under `/nix`, `/boot`, `/dev`, `/proc`, `/sys`, `/run`, `/usr`, `/bin`,
+  `/sbin`, `/lib` or `/lib64`. Default: `"/root/nix"`.
 - `keys` (Map of Object) — Secret files to deploy to the target before building.
   Each key in the map becomes the filename. See [Nested Schema for `keys`](#nested-schema-for-keys).
 - `build_host` (String) — SSH host of a dedicated build machine. When set, the
@@ -194,6 +206,11 @@ yes` in the build host's `sshd_config` (the OpenSSH default).
 - `allow_unfree` (Boolean) — Set `NIXPKGS_ALLOW_UNFREE=1` during build. Default: `true`.
 - `allow_insecure` (Boolean) — Set `NIXPKGS_ALLOW_INSECURE=1` during build. Default: `true`.
 - `garbage_collect` (Boolean) — Run `nix-store --gc` after switching. Default: `true`.
+- `keep_generations` (Number) — Number of system profile generations to keep after
+  switching, the new one included; older generations are deleted with
+  `nix-env --delete-generations`. Defaults to `5` when unset, which preserves the
+  ability to roll back from the bootloader. Set to `1` to keep only the current
+  generation, or `0` to never delete generations. Must be `>= 0`.
 
 ### Read-Only
 
@@ -213,19 +230,23 @@ Each entry in the `keys` map accepts:
 
 ## Deployment Logging
 
-The provider streams build output through Terraform's log system. To see it, set
-the log level:
+Terraform does not let providers write to the terminal during an apply, so the
+provider streams progress and the full `nixos-rebuild` output through
+Terraform's log system at `INFO` level. Nothing is shown unless you enable
+provider logging:
 
 ```bash
 TF_LOG=INFO terraform apply
+# or, to keep Terraform core quiet and only see the provider:
+TF_LOG_PROVIDER=INFO terraform apply
 ```
 
-Log prefixes indicate the phase:
+Each streamed line carries a `phase` field identifying where it came from:
 
-| Prefix | Phase |
+| `phase` | Source |
 |---|---|
-| `[build]` | `nixos-rebuild build` output |
-| `[switch]` | `nixos-rebuild switch` output |
-| `[copy-closure]` | `nix-copy-closure` transfer (build host mode) |
-| `[gc]` | Nix garbage collection |
-| `[git-install]` | Git installation on the build host |
+| `build` | `nixos-rebuild build` output |
+| `switch` | `nixos-rebuild switch` / `switch-to-configuration` output |
+| `copy-closure` | `nix-copy-closure` transfer (build host mode) |
+| `gc` | Nix garbage collection |
+| `git-install` | Git installation on the build host |

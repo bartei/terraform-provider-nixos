@@ -3,7 +3,6 @@ package resource
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -14,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 
@@ -45,8 +45,14 @@ type ConfigurationModel struct {
 	AllowUnfree        types.Bool   `tfsdk:"allow_unfree"`
 	AllowInsecure      types.Bool   `tfsdk:"allow_insecure"`
 	GarbageCollect     types.Bool   `tfsdk:"garbage_collect"`
+	KeepGenerations    types.Int64  `tfsdk:"keep_generations"`
 	SystemHash         types.String `tfsdk:"system_hash"`
 }
+
+// defaultKeepGenerations is the number of system profile generations retained
+// after a switch when keep_generations is not set. Keeping more than one
+// preserves the ability to roll back from the bootloader.
+const defaultKeepGenerations = 5
 
 type KeyModel struct {
 	Content     types.String `tfsdk:"content"`
@@ -114,10 +120,15 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 				Description: "Name of the NixOS configuration output in the flake.",
 			},
 			"remote_directory": schema.StringAttribute{
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("/root/nix"),
-				Description: "Remote directory where the NixOS configuration is uploaded.",
+				Optional:   true,
+				Computed:   true,
+				Default:    stringdefault.StaticString("/root/nix"),
+				Validators: []validator.String{remoteDirValidator{}},
+				Description: "Remote directory where the NixOS configuration is uploaded. " +
+					"It is deleted and recreated on every deploy, so it must be a clean absolute " +
+					"path with at least two components (e.g. /root/nix) and not under a system " +
+					"directory such as /nix or /boot. When several resources share a build host, " +
+					"give each its own remote_directory.",
 			},
 			"keys": schema.MapNestedAttribute{
 				Optional:    true,
@@ -197,6 +208,14 @@ func (r *ConfigurationResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     booldefault.StaticBool(true),
 				Description: "Run nix garbage collection after switching.",
 			},
+			"keep_generations": schema.Int64Attribute{
+				Optional:   true,
+				Validators: []validator.Int64{int64AtLeast{0}},
+				Description: fmt.Sprintf("Number of system profile generations to keep after switching "+
+					"(the new one included); older ones are deleted. Defaults to %d when unset. "+
+					"Set to 0 to never delete generations. Keeping more than 1 preserves the ability "+
+					"to roll back from the bootloader.", defaultKeepGenerations),
+			},
 			"system_hash": schema.StringAttribute{
 				Computed:    true,
 				Description: "Nix store hash of the running system after deployment.",
@@ -268,11 +287,19 @@ func (r *ConfigurationResource) Delete(ctx context.Context, _ resource.DeleteReq
 	tflog.Info(ctx, "NixOS configuration removed from Terraform state. The running system is unchanged.")
 }
 
-// progress writes a status line to stderr so it's visible in terraform output
-// without needing TF_LOG, and also logs via tflog for structured logging.
+// progress logs a deployment status line at INFO. Terraform only surfaces
+// provider logs when TF_LOG (or TF_LOG_PROVIDER) is set; plain writes to
+// stderr are captured by go-plugin at DEBUG, so tflog is the reliable channel.
 func progress(ctx context.Context, msg string) {
-	fmt.Fprintf(os.Stderr, "nixos: %s\n", msg)
 	tflog.Info(ctx, msg)
+}
+
+// streamer returns a RunStreaming callback that logs each line of remote
+// command output at INFO, tagged with the deployment phase it belongs to.
+func streamer(ctx context.Context, phase string) func(string) {
+	return func(line string) {
+		tflog.Info(ctx, line, map[string]interface{}{"phase": phase})
+	}
 }
 
 // deploy is the shared logic for Create and Update. It uploads configuration
@@ -338,47 +365,15 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 			return
 		}
 
-		for name, k := range keys {
-			dest := k.Destination.ValueString()
-			remotePath := fmt.Sprintf("%s/%s", dest, name)
-			progress(ctx, fmt.Sprintf("Deploying key %s to %s", name, remotePath))
-
-			if _, _, err := target.Run(fmt.Sprintf("mkdir -p %s", dest)); err != nil {
-				diags.AddError(fmt.Sprintf("Failed to create key directory %s", dest), err.Error())
-				return
-			}
-
-			if err := target.WriteFile(remotePath, []byte(k.Content.ValueString()), 0600); err != nil {
-				diags.AddError(fmt.Sprintf("Failed to write key %s", name), err.Error())
-				return
-			}
-
-			if _, _, err := target.Run(fmt.Sprintf("chown %s:%s %s", k.User.ValueString(), k.Group.ValueString(), remotePath)); err != nil {
-				diags.AddError(fmt.Sprintf("Failed to set ownership on %s", name), err.Error())
-				return
-			}
-			if _, _, err := target.Run(fmt.Sprintf("chmod %s %s", k.Mode.ValueString(), remotePath)); err != nil {
-				diags.AddError(fmt.Sprintf("Failed to set permissions on %s", name), err.Error())
-				return
-			}
-		}
-
-		// Verify all keys are present
-		for name, k := range keys {
-			remotePath := fmt.Sprintf("%s/%s", k.Destination.ValueString(), name)
-			if _, _, err := target.Run(fmt.Sprintf("test -f %s", remotePath)); err != nil {
-				diags.AddError("Key verification failed",
-					fmt.Sprintf("Key %s not found at %s after deployment", name, remotePath))
-				return
-			}
+		deployKeys(ctx, target, keys, diags)
+		if diags.HasError() {
+			return
 		}
 	}
 
 	// --- Step 3: Ensure git is available on the build host ---
 	progress(ctx, "Ensuring git is installed")
-	buildClient.RunStreaming("nix profile install nixpkgs#git", func(line string) {
-		fmt.Fprintf(os.Stderr, "  %s\n", line)
-	})
+	buildClient.RunStreaming("nix profile install nixpkgs#git", streamer(ctx, "git-install"))
 
 	// --- Step 4: Build environment variables ---
 	var envParts []string
@@ -398,9 +393,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	// $HOME). switchViaBuildHost reads remoteDir/result later.
 	buildCmd := fmt.Sprintf("cd %s && %snixos-rebuild build --flake .#%s --impure", remoteDir, env, configName)
 	progress(ctx, fmt.Sprintf("Building NixOS configuration (%s#%s)", remoteDir, configName))
-	if err := buildClient.RunStreaming(buildCmd, func(line string) {
-		fmt.Fprintf(os.Stderr, "  %s\n", line)
-	}); err != nil {
+	if err := buildClient.RunStreaming(buildCmd, streamer(ctx, "build")); err != nil {
 		diags.AddError("NixOS build failed", err.Error())
 		return
 	}
@@ -411,9 +404,7 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 	} else {
 		switchCmd := fmt.Sprintf("%snixos-rebuild switch --flake %s#%s --impure", env, remoteDir, configName)
 		progress(ctx, "Switching NixOS configuration")
-		if err := target.RunStreaming(switchCmd, func(line string) {
-			fmt.Fprintf(os.Stderr, "  %s\n", line)
-		}); err != nil {
+		if err := target.RunStreaming(switchCmd, streamer(ctx, "switch")); err != nil {
 			diags.AddError("NixOS switch failed", err.Error())
 			return
 		}
@@ -422,23 +413,34 @@ func (r *ConfigurationResource) deploy(ctx context.Context, plan *ConfigurationM
 		return
 	}
 
-	// --- Step 7: Cleanup old generations ---
-	progress(ctx, "Cleaning up old system generations")
-	if _, _, err := target.Run("nix-env -p /nix/var/nix/profiles/system --delete-generations +1"); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: failed to delete old generations: %s\n", err)
+	// --- Step 7: Prune old generations ---
+	keep := int64(defaultKeepGenerations)
+	if !plan.KeepGenerations.IsNull() && !plan.KeepGenerations.IsUnknown() {
+		keep = plan.KeepGenerations.ValueInt64()
+	}
+	if keep > 0 {
+		progress(ctx, fmt.Sprintf("Pruning system generations (keeping the %d most recent)", keep))
+		pruneCmd := fmt.Sprintf("nix-env -p /nix/var/nix/profiles/system --delete-generations +%d", keep)
+		if _, stderr, err := target.Run(pruneCmd); err != nil {
+			tflog.Warn(ctx, "Failed to delete old generations", map[string]interface{}{
+				"error":  err.Error(),
+				"stderr": stderr,
+			})
+		}
+	} else {
+		progress(ctx, "Skipping generation pruning (keep_generations = 0)")
 	}
 
 	if plan.GarbageCollect.ValueBool() {
 		progress(ctx, "Running nix garbage collection")
-		target.RunStreaming("nix-store --gc", func(line string) {
-			fmt.Fprintf(os.Stderr, "  %s\n", line)
-		})
+		target.RunStreaming("nix-store --gc", streamer(ctx, "gc"))
 	}
 
 	// --- Step 8: Read system hash ---
-	hashOutput, _, err := target.Run("nix-store --query --hash /run/current-system")
+	hashOutput, hashStderr, err := target.Run("nix-store --query --hash /run/current-system")
 	if err != nil {
-		diags.AddError("Failed to read system hash after deployment", err.Error())
+		diags.AddError("Failed to read system hash after deployment",
+			fmt.Sprintf("%s: %s", err, strings.TrimSpace(hashStderr)))
 		return
 	}
 	plan.SystemHash = types.StringValue(strings.TrimSpace(hashOutput))
@@ -478,8 +480,20 @@ func (r *ConfigurationResource) switchViaBuildHost(
 			port,
 		)
 	} else {
-		tmpKeyPath := "/tmp/.terraform-nixos-target-key"
+		// Use a unique path per deploy: several resources may share one build
+		// host and Terraform applies them concurrently.
 		progress(ctx, "Deploying temporary SSH key to build host for closure transfer")
+		out, stderr, err := buildClient.Run("mktemp /tmp/.terraform-nixos-key.XXXXXX")
+		if err != nil {
+			diags.AddError("Failed to create temporary key file on build host",
+				fmt.Sprintf("%s: %s", err, stderr))
+			return
+		}
+		tmpKeyPath := strings.TrimSpace(out)
+		if !strings.HasPrefix(tmpKeyPath, "/tmp/.terraform-nixos-key.") || strings.ContainsAny(tmpKeyPath, " \t\n'\"`$;&|") {
+			diags.AddError("Unexpected mktemp output on build host", fmt.Sprintf("got %q", out))
+			return
+		}
 		if err := buildClient.WriteFile(tmpKeyPath, []byte(key), 0600); err != nil {
 			diags.AddError("Failed to deploy temporary key to build host", err.Error())
 			return
@@ -507,9 +521,7 @@ func (r *ConfigurationResource) switchViaBuildHost(
 		sshOpts, user, host, resultPath,
 	)
 	progress(ctx, fmt.Sprintf("Copying closure to %s", host))
-	if err := buildClient.RunStreaming(copyCmd, func(line string) {
-		fmt.Fprintf(os.Stderr, "  %s\n", line)
-	}); err != nil {
+	if err := buildClient.RunStreaming(copyCmd, streamer(ctx, "copy-closure")); err != nil {
 		diags.AddError("Failed to copy closure to target", err.Error())
 		return
 	}
@@ -522,9 +534,7 @@ func (r *ConfigurationResource) switchViaBuildHost(
 	}
 
 	switchCmd := fmt.Sprintf("%s/bin/switch-to-configuration switch", resultPath)
-	if err := target.RunStreaming(switchCmd, func(line string) {
-		fmt.Fprintf(os.Stderr, "  %s\n", line)
-	}); err != nil {
+	if err := target.RunStreaming(switchCmd, streamer(ctx, "switch")); err != nil {
 		diags.AddError("Failed to switch configuration on target", err.Error())
 		return
 	}

@@ -1,7 +1,7 @@
 // Package acctest contains shared helpers for acceptance tests of the nixos
 // provider. Acceptance tests run a real `terraform apply` against an SSH-
-// reachable target (in CI, a NixOS-in-docker container brought up by
-// test/docker/run.sh).
+// reachable target (in CI and locally, a NixOS QEMU VM brought up by
+// test/qemu/run.sh; see `make testacc-vm-up`).
 package acctest
 
 import (
@@ -47,7 +47,7 @@ type Target struct {
 }
 
 // PreCheck must be called from every acceptance test's PreCheck closure. It
-// fails the test if TF_ACC is unset or the target is unreachable.
+// fails the test if TF_ACC is unset or the NixOS target is unreachable.
 func PreCheck(t *testing.T) {
 	t.Helper()
 	if os.Getenv("TF_ACC") == "" {
@@ -57,20 +57,43 @@ func PreCheck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acctest target not configured: %v", err)
 	}
+	PreCheckTarget(t, tg)
+}
+
+// PreCheckTarget fails the test if TF_ACC is unset or the given target is
+// unreachable.
+func PreCheckTarget(t *testing.T, tg Target) {
+	t.Helper()
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set; skipping acceptance test")
+	}
 	if err := waitForSSH(tg, 10*time.Second); err != nil {
 		t.Fatalf("target %s:%s unreachable: %v", tg.Host, tg.Port, err)
 	}
 }
 
-// TargetFromEnv reads NIXOS_TEST_* env vars and returns a populated Target.
+// TargetFromEnv reads NIXOS_TEST_* env vars and returns a populated Target
+// for the NixOS VM.
 func TargetFromEnv() (Target, error) {
-	hp := os.Getenv("NIXOS_TEST_HOST")
+	return targetFromEnv("NIXOS_TEST_HOST")
+}
+
+// SystemManagerTargetFromEnv returns the Target for the non-NixOS (Debian)
+// VM used by the nixos_system_manager tests. The host comes from
+// SYSMGR_TEST_HOST; the key and user are shared with the NixOS target
+// (NIXOS_TEST_KEY_PATH, NIXOS_TEST_USER).
+func SystemManagerTargetFromEnv() (Target, error) {
+	return targetFromEnv("SYSMGR_TEST_HOST")
+}
+
+func targetFromEnv(hostVar string) (Target, error) {
+	hp := os.Getenv(hostVar)
 	if hp == "" {
-		return Target{}, fmt.Errorf("NIXOS_TEST_HOST is not set (expected host:port)")
+		return Target{}, fmt.Errorf("%s is not set (expected host:port)", hostVar)
 	}
 	host, port, err := net.SplitHostPort(hp)
 	if err != nil {
-		return Target{}, fmt.Errorf("NIXOS_TEST_HOST %q: %w", hp, err)
+		return Target{}, fmt.Errorf("%s %q: %w", hostVar, hp, err)
 	}
 
 	keyPath := os.Getenv("NIXOS_TEST_KEY_PATH")

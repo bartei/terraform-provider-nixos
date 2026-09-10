@@ -214,10 +214,16 @@ func (c *Client) RunStreaming(cmd string, onOutput func(string)) error {
 }
 
 // WriteFiles writes a map of relative-path → content into baseDir on the remote
-// host. The remote directory is cleaned before writing.
+// host. The remote directory is deleted and recreated before writing, so
+// baseDir must pass ValidateRemoteDir.
 func (c *Client) WriteFiles(baseDir string, files map[string]string) error {
+	if err := ValidateRemoteDir(baseDir); err != nil {
+		return fmt.Errorf("refusing to clean remote directory: %w", err)
+	}
 	// Clean target directory for consistent state
-	c.Run(fmt.Sprintf("rm -rf %s", baseDir))
+	if _, stderr, err := c.Run(fmt.Sprintf("rm -rf %s", baseDir)); err != nil {
+		return fmt.Errorf("cleaning %s: %w: %s", baseDir, err, strings.TrimSpace(stderr))
+	}
 
 	sftpClient, err := sftp.NewClient(c.conn)
 	if err != nil {
@@ -247,7 +253,8 @@ func (c *Client) WriteFiles(baseDir string, files map[string]string) error {
 }
 
 // WriteFile writes content to a single file on the remote host with the given
-// permissions.
+// permissions. The mode is applied before any content is written, so a secret
+// is never observable under the umask-derived default mode (typically 0644).
 func (c *Client) WriteFile(remotePath string, content []byte, mode os.FileMode) error {
 	sftpClient, err := sftp.NewClient(c.conn)
 	if err != nil {
@@ -260,18 +267,18 @@ func (c *Client) WriteFile(remotePath string, content []byte, mode os.FileMode) 
 		return fmt.Errorf("creating directory %s: %w", parentDir, err)
 	}
 
-	f, err := sftpClient.Create(remotePath)
+	f, err := sftpClient.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("creating %s: %w", remotePath, err)
 	}
 	defer f.Close()
 
-	if _, err := f.Write(content); err != nil {
-		return fmt.Errorf("writing %s: %w", remotePath, err)
+	if err := f.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", remotePath, err)
 	}
 
-	if err := sftpClient.Chmod(remotePath, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", remotePath, err)
+	if _, err := f.Write(content); err != nil {
+		return fmt.Errorf("writing %s: %w", remotePath, err)
 	}
 
 	return nil

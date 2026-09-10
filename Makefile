@@ -5,7 +5,7 @@ VERSION     = 0.1.0
 OS_ARCH     = $(shell go env GOOS)_$(shell go env GOARCH)
 INSTALL_DIR = ~/.terraform.d/plugins/$(HOSTNAME)/$(NAMESPACE)/$(NAME)/$(VERSION)/$(OS_ARCH)
 
-.PHONY: build install clean dev test testacc testacc-vm-up testacc-vm-down
+.PHONY: build install clean dev test testacc testacc-vm-up testacc-vm-down testacc-debian-vm-up testacc-debian-vm-down
 
 build:
 	go build -o terraform-provider-nixos
@@ -41,7 +41,8 @@ testacc:
 	NIXOS_TEST_HOST=$$(cat test/qemu/.vm-host) \
 	NIXOS_TEST_KEY_PATH=$(CURDIR)/test/qemu/.keys/id_ed25519 \
 	NIXOS_TEST_USER=root \
-	go test -v -count=1 -timeout 30m ./internal/resource/...
+	SYSMGR_TEST_HOST=$$(cat test/debian/.vm-host 2>/dev/null) \
+	go test -v -count=1 -timeout 30m ./internal/resource/... ./internal/sshclient/...
 
 testacc-vm-up:
 	cd test/qemu && ./build.sh && ./run.sh > .vm-host
@@ -50,6 +51,17 @@ testacc-vm-up:
 testacc-vm-down:
 	cd test/qemu && ./stop.sh
 	rm -f test/qemu/.vm-host
+
+# Debian VM for the nixos_system_manager tests (non-NixOS target). Optional:
+# the system-manager tests skip when SYSMGR_TEST_HOST is empty. Requires
+# genisoimage (cdrkit) in addition to QEMU.
+testacc-debian-vm-up:
+	cd test/debian && ./run.sh > .vm-host
+	@echo "Debian VM ready at $$(cat test/debian/.vm-host)"
+
+testacc-debian-vm-down:
+	cd test/debian && ./stop.sh
+	rm -f test/debian/.vm-host
 
 clean:
 	rm -f terraform-provider-nixos
